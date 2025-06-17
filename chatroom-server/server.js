@@ -12,7 +12,7 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3000", // Ensure this is correct for your client
+    origin: ["http://localhost:3000", "https://b-l-n-k-e-r.github.io"], // Ensure this is correct for your client
     methods: ["GET", "POST"],
     transports: ["websocket", "polling"],
     credentials: true,
