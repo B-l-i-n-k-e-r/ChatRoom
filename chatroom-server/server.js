@@ -4,7 +4,6 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const validator = require("validator");
-const rateLimiter = require("socket.io-rate-limiter");
 
 const app = express();
 app.use(cors());
@@ -20,14 +19,27 @@ const io = new Server(server, {
   connectionStateRecovery: { maxDisconnectionDuration: 60000 }
 });
 
-// Rate limiter: 5 events per 10 seconds
-io.use(rateLimiter({
-  windowMs: 10000,
-  max: 5,
-  onExceeded: (socket) => socket.disconnect()
-}));
+// Simple in-memory rate limiter (5 events per 10 seconds per socket)
+const rateLimitMap = new Map();
+io.use((socket, next) => {
+  const now = Date.now();
+  const windowMs = 10000;
+  const maxEvents = 5;
 
-// JWT secret (use environment variables in production)
+  const timestamps = rateLimitMap.get(socket.id) || [];
+  const recent = timestamps.filter(ts => now - ts < windowMs);
+
+  if (recent.length >= maxEvents) {
+    console.log(`⚠️ Rate limit exceeded for socket: ${socket.id}`);
+    return socket.disconnect();
+  }
+
+  recent.push(now);
+  rateLimitMap.set(socket.id, recent);
+  next();
+});
+
+// JWT secret (use .env for production)
 const JWT_SECRET = "your_secret_key_here";
 
 // In-memory storage
@@ -57,18 +69,15 @@ io.on("connection", (socket) => {
       return socket.emit("error", "Room and username are required");
     }
 
-    // Password check (if room has one)
     if (roomPasswords[room] && roomPasswords[room] !== password) {
       return socket.emit("error", "Incorrect room password");
     }
 
     socket.join(room);
 
-    // Track user
     if (!usersInRooms[room]) usersInRooms[room] = [];
     usersInRooms[room].push({ username, socketId: socket.id });
 
-    // Send room data
     io.to(room).emit("room_users", usersInRooms[room]);
     if (roomMessages[room]) {
       socket.emit("message_history", roomMessages[room]);
@@ -81,11 +90,9 @@ io.on("connection", (socket) => {
   socket.on("send_message", (data) => {
     if (!data.room || !data.text) return;
 
-    // Sanitize and validate
     data.text = validator.escape(data.text.trim());
     if (data.text === "") return;
 
-    // Store message
     if (!roomMessages[data.room]) roomMessages[data.room] = [];
     const newMessage = {
       id: Date.now(),
@@ -97,7 +104,6 @@ io.on("connection", (socket) => {
     };
     roomMessages[data.room].push(newMessage);
 
-    // Broadcast
     io.to(data.room).emit("receive_message", newMessage);
   });
 
@@ -108,7 +114,6 @@ io.on("connection", (socket) => {
 
     io.to(room).emit("typing_users", Array.from(typingUsers[room]));
 
-    // Auto-clear after 3s
     setTimeout(() => {
       typingUsers[room]?.delete(socket.user.username);
       io.to(room).emit("typing_users", Array.from(typingUsers[room] || []));
@@ -125,7 +130,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// HTTP endpoint for login (returns JWT)
+// Login endpoint (returns JWT)
 app.post("/login", (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).send("Username required");
@@ -134,7 +139,31 @@ app.post("/login", (req, res) => {
   res.json({ token });
 });
 
-// Cleanup inactive rooms hourly
+// Temporary in-memory user store
+const registeredUsers = {}; // { username: password }
+
+app.post("/signup", (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ error: "Username and password required" });
+  }
+
+  if (registeredUsers[username]) {
+    return res.status(409).json({ error: "Username already exists" });
+  }
+
+  // Store the user (for demo purposes only — no hashing)
+  registeredUsers[username] = password;
+
+  // Optionally auto-login after signup:
+  const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: "1d" });
+
+  res.status(201).json({ message: "Signup successful", token });
+});
+
+
+// Cleanup empty rooms hourly
 setInterval(() => {
   for (const room in usersInRooms) {
     if (usersInRooms[room].length === 0) {
@@ -145,6 +174,6 @@ setInterval(() => {
   }
 }, 3600000);
 
-server.listen(3001, () => {
-  console.log("Server running on http://localhost:3001");
+server.listen(3005, () => {
+  console.log("✅ Server running on http://localhost:3001");
 });
